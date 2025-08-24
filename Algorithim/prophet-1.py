@@ -2,8 +2,8 @@ import pandas as pd
 from prophet import Prophet
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import TimeSeriesSplit
 import numpy as np
+from scipy.stats import zscore
 
 # ============================= بارگذاری داده =============================
 df = pd.read_csv("D:/third semester/Casystudy2/2-Dataset/electricity_consumption-2.csv")
@@ -18,6 +18,11 @@ df.dropna(subset=['Timestamp'], inplace=True)
 df.dropna(inplace=True)
 df.drop_duplicates(inplace=True)
 
+# حذف داده‌های پرت با Z-score
+numeric_cols = df.select_dtypes(include=[np.number])
+z_scores = np.abs(zscore(numeric_cols))
+df = df[(z_scores < 3).all(axis=1)]
+
 # ============================= مرتب‌سازی زمانی =============================
 df.sort_values(by='Timestamp', inplace=True)
 df.reset_index(drop=True, inplace=True)
@@ -27,54 +32,61 @@ df_prophet = df[['Timestamp', 'Energy Consumption (kWh)']].copy()
 df_prophet.rename(columns={'Timestamp': 'ds', 'Energy Consumption (kWh)': 'y'}, inplace=True)
 
 # ============================= تکمیل فواصل زمانی ساعتی =============================
-df_prophet = df_prophet.set_index('ds').asfreq('h')
-df_prophet['y'] = df_prophet['y'].interpolate(method='linear')
+df_prophet = df_prophet.set_index('ds').asfreq('h')  # توجه به h کوچک برای pandas جدید
+df_prophet['y'] = df_prophet['y'].interpolate(method='linear')  # پر کردن گپ‌ها
 df_prophet.reset_index(inplace=True)
 
-# ============================= Cross-Validation با TimeSeriesSplit =============================
-tscv = TimeSeriesSplit(n_splits=5)
+print("\n📊 داده آماده برای Prophet بعد از تکمیل ساعتی:")
+print(df_prophet.head(10))
 
-mae_list = []
-mse_list = []
-r2_list = []
+# ============================= تقسیم آموزش و تست =============================
+train_size = int(len(df_prophet) * 0.8)
+train = df_prophet.iloc[:train_size]
+test = df_prophet.iloc[train_size:]
 
-for fold, (train_index, test_index) in enumerate(tscv.split(df_prophet)):
-    train = df_prophet.iloc[train_index]
-    test = df_prophet.iloc[test_index]
+# ============================= ساخت مدل Prophet =============================
+model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=True)
+model.add_seasonality(name='hourly', period=24, fourier_order=10)
 
-    model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=True)
-    model.add_seasonality(name='hourly', period=24, fourier_order=10)
 
-    model.fit(train)
+model.fit(train)
 
-    future = test[['ds']]
-    forecast = model.predict(future)
+# ============================= ساخت future با متد Prophet =============================
+future = model.make_future_dataframe(periods=len(test), freq='h')
 
-    y_true = test['y'].values
-    y_pred = forecast['yhat'].values
+# ============================= پیش‌بینی =============================
+forecast = model.predict(future)
 
-    mae = mean_absolute_error(y_true, y_pred)
-    mse = mean_squared_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
+# ============================= آماده‌سازی داده برای ارزیابی =============================
+df_eval = forecast[['ds', 'yhat']].merge(test[['ds', 'y']], on='ds', how='inner')
 
-    mae_list.append(mae)
-    mse_list.append(mse)
-    r2_list.append(r2)
+y_true = df_eval['y'].values
+y_pred = df_eval['yhat'].values
 
-    print(f"Fold {fold + 1}: MAE={mae:.4f}, MSE={mse:.4f}, R²={r2:.4f}")
+# ============================= ارزیابی مدل =============================
+mae = mean_absolute_error(y_true, y_pred)
+mse = mean_squared_error(y_true, y_pred)
+r2 = r2_score(y_true, y_pred)
 
-print("\n📊 میانگین ارزیابی‌ها روی همه Fold ها:")
-print(f"Mean MAE: {np.mean(mae_list):.4f}")
-print(f"Mean MSE: {np.mean(mse_list):.4f}")
-print(f"Mean R²: {np.mean(r2_list):.4f}")
+print("\n📈 ارزیابی مدل Prophet:")
+print(f"MAE: {mae:.4f}")
+print(f"MSE: {mse:.4f}")
+print(f"R²: {r2:.4f}")
 
-# اگر خواستی می‌تونی نمودار پیش‌بینی آخرین Fold رو ترسیم کنی
-plt.figure(figsize=(14,6))
-plt.plot(test['ds'], y_true, label='Actual')
-plt.plot(test['ds'], y_pred, label='Predicted', color='red')
+# ============================= ترسیم نمودار =============================
+plt.figure(figsize=(14, 6))
+plt.plot(df_eval['ds'], y_true, label='Actual')
+plt.plot(df_eval['ds'], y_pred, label='Prophet Forecast', color='red')
 plt.legend()
-plt.title('Prophet Forecast vs Actual (Last Fold)')
-plt.xlabel('Date')
-plt.ylabel('Energy Consumption (kWh)')
+plt.title("Prophet Forecast vs Actual Energy Consumption (Hourly)")
+plt.xlabel("Date")
+plt.ylabel("Energy Consumption (kWh)")
 plt.grid()
+plt.show()
+
+# نمودارهای داخلی Prophet
+model.plot(forecast)
+plt.show()
+
+model.plot_components(forecast)
 plt.show()
